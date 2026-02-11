@@ -1,0 +1,342 @@
+name: Build PHP 7.3.33 Multi-arch
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # 允许手动触发
+    inputs:
+      architectures:
+        description: '选择架构 (用逗号分隔)'
+        required: false
+        default: 'x86_64,aarch64,armv7l'
+
+env:
+  PHP_VERSION: "7.3.33"
+  BUILD_DIR: "${{ github.workspace }}/build"
+  INSTALL_DIR: "${{ github.workspace }}/install"
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Set matrix
+        id: set-matrix
+        run: |
+          # 解析输入的架构
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ARCHS="${{ github.event.inputs.architectures }}"
+          else
+            ARCHS="x86_64,aarch64,armv7l"
+          fi
+          
+          # 转换为 JSON 数组
+          MATRIX=$(echo "$ARCHS" | tr ',' '\n' | jq -R -s -c 'split("\n") | map(select(. != ""))')
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+  build:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: ${{ fromJson(needs.setup.outputs.matrix) }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        path: php-src
+    
+    - name: Setup build environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          autoconf \
+          automake \
+          libtool \
+          pkg-config \
+          re2c \
+          bison \
+          flex \
+          libxml2-dev \
+          libssl-dev \
+          libcurl4-openssl-dev \
+          libsqlite3-dev \
+          libpng-dev \
+          libjpeg-dev \
+          libfreetype6-dev \
+          libonig-dev \
+          libzip-dev \
+          libyaml-dev \
+          libgmp-dev \
+          libgd-dev \
+          libreadline-dev \
+          libedit-dev \
+          libxslt1-dev \
+          libpcre3-dev \
+          libargon2-dev \
+          libsodium-dev \
+          libicu-dev \
+          qemu-user-static \
+          binfmt-support
+        
+        # 安装特定架构的交叉编译工具链
+        case "${{ matrix.arch }}" in
+          "x86_64")
+            echo "Building for x86_64 (native)"
+            ;;
+          "aarch64")
+            echo "Installing aarch64 cross-compiler"
+            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            ;;
+          "armv7l")
+            echo "Installing armv7l cross-compiler"
+            sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+            ;;
+        esac
+    
+    - name: Configure PHP build
+      run: |
+        cd php-src
+        
+        # 清理之前的构建
+        make distclean 2>/dev/null || true
+        
+        # 设置编译参数
+        export CC="gcc"
+        export CXX="g++"
+        export CFLAGS="-O2 -pipe"
+        export CXXFLAGS="-O2 -pipe"
+        
+        # 根据架构设置交叉编译参数
+        case "${{ matrix.arch }}" in
+          "x86_64")
+            export HOST="x86_64-linux-gnu"
+            export BUILD="x86_64-linux-gnu"
+            export TARGET="x86_64-linux-gnu"
+            ;;
+          "aarch64")
+            export HOST="aarch64-linux-gnu"
+            export BUILD="x86_64-linux-gnu"
+            export TARGET="aarch64-linux-gnu"
+            export CC="aarch64-linux-gnu-gcc"
+            export CXX="aarch64-linux-gnu-g++"
+            ;;
+          "armv7l")
+            export HOST="arm-linux-gnueabihf"
+            export BUILD="x86_64-linux-gnu"
+            export TARGET="arm-linux-gnueabihf"
+            export CC="arm-linux-gnueabihf-gcc"
+            export CXX="arm-linux-gnueabihf-g++"
+            ;;
+        esac
+        
+        # 配置 PHP
+        ./buildconf --force
+        
+        ./configure \
+          --prefix="${{ env.INSTALL_DIR }}/php-${{ env.PHP_VERSION }}-${{ matrix.arch }}" \
+          --host="$HOST" \
+          --build="$BUILD" \
+          --target="$TARGET" \
+          --enable-embed=static \
+          --disable-all \
+          --enable-cli \
+          --enable-cgi \
+          --enable-fpm \
+          --with-config-file-path=/etc/php/${{ env.PHP_VERSION }} \
+          --with-config-file-scan-dir=/etc/php/${{ env.PHP_VERSION }}/conf.d \
+          \
+          # 启用所有需要的扩展
+          --enable-bcmath \
+          --enable-calendar \
+          --enable-ctype \
+          --enable-curl \
+          --enable-dom \
+          --enable-filter \
+          --enable-ftp \
+          --enable-gd \
+          --enable-hash \
+          --enable-json \
+          --enable-libxml \
+          --enable-mbstring \
+          --enable-mysqlnd \
+          --enable-openssl \
+          --enable-pcntl \
+          --enable-pdo \
+          --enable-phar \
+          --enable-posix \
+          --enable-shmop \
+          --enable-simplexml \
+          --enable-sockets \
+          --enable-sqlite3 \
+          --enable-tokenizer \
+          --enable-xml \
+          --enable-xmlreader \
+          --enable-xmlwriter \
+          --enable-zip \
+          --enable-zlib \
+          \
+          # 扩展配置
+          --with-curl \
+          --with-dom \
+          --with-gd \
+          --with-gmp \
+          --with-libxml \
+          --with-mysqli=mysqlnd \
+          --with-openssl \
+          --with-pcre-regex \
+          --with-pdo-mysql=mysqlnd \
+          --with-pdo-sqlite \
+          --with-readline \
+          --with-sqlite3 \
+          --with-xsl \
+          --with-yaml \
+          --with-zip \
+          --with-zlib \
+          \
+          # 线程安全
+          --enable-maintainer-zts \
+          --with-pthreads \
+          \
+          # 禁用不需要的功能
+          --disable-debug \
+          --disable-rpath \
+          --without-pear
+    
+    - name: Build PHP
+      run: |
+        cd php-src
+        make -j$(nproc)
+        make install
+        
+        # 验证构建
+        file "${{ env.INSTALL_DIR }}/php-${{ env.PHP_VERSION }}-${{ matrix.arch }}/bin/php" | tee arch-info.txt
+    
+    - name: Test PHP binary
+      run: |
+        cd "${{ env.INSTALL_DIR }}/php-${{ env.PHP_VERSION }}-${{ matrix.arch }}/bin"
+        
+        # 使用 QEMU 模拟器测试非本地架构
+        if [ "${{ matrix.arch }}" != "x86_64" ]; then
+          qemu-"${{ matrix.arch }}" ./php --version
+        else
+          ./php --version
+        fi
+        
+        # 检查已启用的扩展
+        if [ "${{ matrix.arch }}" != "x86_64" ]; then
+          qemu-"${{ matrix.arch }}" ./php -m
+        else
+          ./php -m
+        fi
+    
+    - name: Package build artifacts
+      run: |
+        cd "${{ env.INSTALL_DIR }}"
+        tar -czf "php-${{ env.PHP_VERSION }}-${{ matrix.arch }}.tar.gz" "php-${{ env.PHP_VERSION }}-${{ matrix.arch }}"
+        
+        # 创建校验和
+        sha256sum "php-${{ env.PHP_VERSION }}-${{ matrix.arch }}.tar.gz" > "php-${{ env.PHP_VERSION }}-${{ matrix.arch }}.tar.gz.sha256"
+        
+        # 列出文件大小
+        ls -lh "php-${{ env.PHP_VERSION }}-${{ matrix.arch }}.tar.gz"
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: php-${{ env.PHP_VERSION }}-${{ matrix.arch }}
+        path: |
+          ${{ env.INSTALL_DIR }}/php-${{ env.PHP_VERSION }}-${{ matrix.arch }}.tar.gz
+          ${{ env.INSTALL_DIR }}/php-${{ env.PHP_VERSION }}-${{ matrix.arch }}.tar.gz.sha256
+        retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+    
+    - name: Create release archive
+      run: |
+        mkdir -p release
+        find artifacts -name "*.tar.gz" -exec cp {} release/ \;
+        find artifacts -name "*.sha256" -exec cp {} release/ \;
+        
+        # 创建 README
+        cat > release/README.md << 'EOF'
+        # PHP ${{ env.PHP_VERSION }} Multi-arch Builds
+        
+        ## 支持的架构
+        
+        1. **x86_64** - 64位 Intel/AMD 处理器
+        2. **aarch64** - 64位 ARM 处理器 (ARMv8)
+        3. **armv7l** - 32位 ARM 处理器 (ARMv7)
+        
+        ## 使用方法
+        
+        解压对应架构的压缩包：
+        ```bash
+        tar -xzf php-${{ env.PHP_VERSION }}-<arch>.tar.gz
+        cd php-${{ env.PHP_VERSION }}-<arch>
+        ./bin/php --version
+        ```
+        
+        ## 验证文件完整性
+        
+        ```bash
+        sha256sum -c php-${{ env.PHP_VERSION }}-<arch>.tar.gz.sha256
+        ```
+        
+        ## 包含的扩展
+        
+        - bcmath, calendar, Core, crypto, ctype, curl, date, dom
+        - ds, filter, ftp, gd, gmp, hash, igbinary, json
+        - leveldb, libxml, mbstring, mysqli, mysqlnd, openssl
+        - pcntl, pcre, PDO, pdo_mysql, pdo_sqlite, Phar
+        - pocketmine_chunkutils, posix, pthreads, recursionguard
+        - Reflection, shmop, SimpleXML, sockets, SPL, sqlite3
+        - standard, tokenizer, xml, xmlreader, xmlwriter, yaml, zip, zlib
+        EOF
+        
+        # 创建打包文件
+        cd release
+        tar -czf "php-${{ env.PHP_VERSION }}-multi-arch.tar.gz" .
+    
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: |
+          release/php-${{ env.PHP_VERSION }}-multi-arch.tar.gz
+          release/README.md
+        body: |
+          # PHP ${{ env.PHP_VERSION }} Multi-arch Build
+          
+          ## 支持的架构
+          - x86_64 (Intel/AMD 64位)
+          - aarch64 (ARM 64位)
+          - armv7l (ARM 32位)
+          
+          ## 构建信息
+          - 构建时间: ${{ github.event.head_commit.timestamp }}
+          - 提交: ${{ github.sha }}
+          - 工作流: ${{ github.workflow }}
+    
+    - name: Upload to workflow artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: php-${{ env.PHP_VERSION }}-multi-arch-release
+        path: |
+          release/php-${{ env.PHP_VERSION }}-multi-arch.tar.gz
+          release/README.md
+        retention-days: 30
